@@ -1,0 +1,11 @@
+lark-oapi==1.0.10
+python-dotenv==1.0.0
+sqlalchemy==2.0.27
+mysql-connector-python==8.3.0
+openai==1.12.0
+python-dateutil==2.8.2
+fastapi==0.109.2
+uvicorn==0.27.1
+redis==5.0.1
+pydantic==2.6.1
+httpx==0.27.0
