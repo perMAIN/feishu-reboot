@@ -38,6 +38,24 @@ except Exception as e:
 
 def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
     try:
+        # 检查是否已经处理过该消息
+        message_id = data.event.message.message_id
+        event_id = data.header.event_id
+        
+        # 使用Redis或内存缓存来存储已处理的消息ID
+        processed_events = getattr(do_p2_im_message_receive_v1, 'processed_events', set())
+        if event_id in processed_events:
+            logger.info(f"事件 {event_id} 已经处理过，跳过")
+            return
+        
+        # 添加到已处理集合
+        processed_events.add(event_id)
+        setattr(do_p2_im_message_receive_v1, 'processed_events', processed_events)
+        
+        # 如果集合太大，清理一下
+        if len(processed_events) > 1000:
+            processed_events.clear()
+        
         logger.info("收到新消息")
         res_content = ""
         message_type = data.event.message.message_type
@@ -57,7 +75,11 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
             logger.info(f"消息内容: {res_content}")
 
         response = handler.handle_message(
-            res_content, data.event.message.chat_id, message_type)
+            res_content, 
+            data.event.message.chat_id, 
+            message_type,
+            message_id
+        )
         logger.info(f"消息处理结果: {response}")
 
         if response:
@@ -86,7 +108,7 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
                 logger.info("群聊消息，使用 reply 接口发送")
                 request = (
                     ReplyMessageRequest.builder()
-                    .message_id(data.event.message.message_id)
+                    .message_id(message_id)
                     .request_body(
                         ReplyMessageRequestBody.builder()
                         .content(content)

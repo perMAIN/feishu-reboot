@@ -48,10 +48,11 @@ class Checkin(Base):
 
     id = Column(Integer, primary_key=True)
     signup_id = Column(Integer, ForeignKey('signups.id'), nullable=False)
+    nickname = Column(String(100), nullable=False)  # 添加昵称字段
     checkin_date = Column(Date, nullable=False)
     content = Column(Text, nullable=False)
-    ai_feedback = Column(Text)
     created_at = Column(DateTime, default=datetime.now)
+    checkin_count = Column(Integer)  # 添加打卡次数字段
 
     signup = relationship("Signup", back_populates="checkins")
 
