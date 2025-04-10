@@ -8,6 +8,7 @@ from .openai_service import generate_ai_feedback
 from .feishu_service import FeishuService
 import os
 import requests
+import time
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -403,18 +404,36 @@ class MessageHandler:
             # 生成打卡反馈
             try:
                 logger.info(f"开始生成AI反馈 - 用户: {nickname}")
-                return generate_ai_feedback(
-                    db=self.db,
-                    signup_id=signup.id,
-                    nickname=nickname,
-                    goals=signup.goals,
-                    content=content,
-                    checkin_count=len(user_checkins) + 1
-                )
+                retry_count = 3  # 最大重试次数
+                ai_feedback = None
+                
+                while retry_count > 0:
+                    try:
+                        ai_feedback = generate_ai_feedback(
+                            db=self.db,
+                            signup_id=signup.id,
+                            nickname=nickname,
+                            goals=signup.goals,
+                            content=content,
+                            checkin_count=len(user_checkins) + 1
+                        )
+                        if ai_feedback:
+                            break
+                    except Exception as e:
+                        logger.error(f"生成AI反馈失败 (还剩{retry_count-1}次重试): {str(e)}")
+                        retry_count -= 1
+                        if retry_count > 0:
+                            # 短暂等待后重试
+                            time.sleep(1)
+                
+                if ai_feedback:
+                    return ai_feedback
+                else:
+                    return f"✨ 打卡成功！\n📝 第 {len(user_checkins) + 1}/21 次打卡\n\n继续加油，你的每一步进展都很棒！ 🌟"
                 
             except Exception as ai_error:
                 logger.error(f"AI反馈生成失败: {str(ai_error)}")
-                return f"✅ 打卡成功！\n📊 这是您本期活动的第 {len(user_checkins) + 1}/21 次打卡\n\n❌ AI反馈生成失败，请联系管理员"
+                return f"✨ 打卡成功！\n📝 第 {len(user_checkins) + 1}/21 次打卡\n\n继续加油，你的每一步进展都很棒！ 🌟"
             
         except Exception as e:
             error_msg = f"打卡失败：{str(e)}"
@@ -422,10 +441,9 @@ class MessageHandler:
             self.db.rollback()
             return "❌ 打卡失败，请稍后重试或联系管理员"
 
-    def handle_activity_end(self, chat_id: str) -> str:
-        """处理活动结束命令"""
+    async def handle_activity_end(self, message_id: str) -> str:
+        """处理活动结束"""
         try:
-            logger.info("开始处理活动结束命令")
             # 获取当前进行中的活动期数
             current_period = self.db.query(Period)\
                 .filter(Period.status == '进行中')\
@@ -437,6 +455,64 @@ class MessageHandler:
                 return error_msg
 
             try:
+                # 获取所有报名记录
+                signups = self.db.query(Signup)\
+                    .filter(Signup.period_id == current_period.id)\
+                    .all()
+
+                # 收集每个开发者的打卡统计和成果
+                developer_stats = []
+                qualified_developers = []  # 达标开发者
+                
+                for signup in signups:
+                    # 获取该开发者的所有打卡记录
+                    checkins = self.db.query(Checkin)\
+                        .filter(Checkin.signup_id == signup.id)\
+                        .order_by(Checkin.checkin_date)\
+                        .all()
+                    
+                    checkin_count = len(checkins)
+                    
+                    # 检查是否达标（9次有效打卡）
+                    is_qualified = checkin_count >= 9
+                    
+                    # 生成开发者的AI表扬语
+                    praise = ""
+                    if checkin_count > 0:
+                        retry_count = 3  # 最大重试次数
+                        while retry_count > 0:
+                            try:
+                                # 使用最后一次打卡内容生成表扬
+                                latest_checkin = checkins[-1]
+                                praise = generate_ai_feedback(
+                                    db=self.db,
+                                    signup_id=signup.id,
+                                    nickname=signup.nickname,
+                                    goals=signup.goals,
+                                    content=latest_checkin.content,
+                                    checkin_count=checkin_count,
+                                    is_final=True  # 标记这是结束总结
+                                )
+                                if praise:
+                                    praise = praise.split('\n\n')[-1]  # 只取AI反馈部分
+                                    break
+                            except Exception as e:
+                                logger.error(f"生成AI表扬失败 (还剩{retry_count-1}次重试): {str(e)}")
+                                retry_count -= 1
+                                if retry_count == 0:
+                                    praise = "很棒的表现！期待下次再见！"  # 默认表扬语
+                            
+                    developer_stats.append({
+                        'nickname': signup.nickname,
+                        'focus_area': signup.focus_area,
+                        'checkin_count': checkin_count,
+                        'is_qualified': is_qualified,
+                        'praise': praise
+                    })
+                    
+                    if is_qualified:
+                        qualified_developers.append(signup.nickname)
+
                 # 更新活动状态为已结束
                 current_period.status = '已结束'
                 self.db.commit()
@@ -445,9 +521,47 @@ class MessageHandler:
                 # 构建响应消息
                 response_lines = [
                     f"✨ {current_period.period_name}期活动圆满结束！",
-                    "感谢大家的积极参与和付出！",
-                    "期待下次活动再见！🌟"
+                    "感谢大家的积极参与和付出！\n"
                 ]
+                
+                # 添加开发者统计信息
+                response_lines.append("📊 开发者打卡统计：")
+                for dev in developer_stats:
+                    response_lines.append(f"\n{dev['nickname']} ({dev['focus_area']})：")
+                    response_lines.append(f"- 打卡进度：{dev['checkin_count']}/21次")
+                    response_lines.append(f"- {dev['praise']}")
+                
+                # 添加达标情况说明
+                response_lines.append("\n🎯 达标情况：")
+                response_lines.append("- 达标要求：21天内完成9次有效打卡 + 实现自定目标")
+                
+                if qualified_developers:
+                    response_lines.append("\n🏆 本期达标开发者：")
+                    for dev in qualified_developers:
+                        response_lines.append(f"- {dev}")
+                else:
+                    response_lines.append("\n本期暂无达标开发者，继续加油！")
+                
+                # 添加奖励机制说明
+                response_lines.extend([
+                    "\n🌟 完成达标有机会获得：",
+                    "1. 社区网站展示机会",
+                    "2. 公众号专题报道机会",
+                    "3. 创新项目Demo日展示机会"
+                ])
+                
+                # 对未达标者的简短鼓励
+                if len(qualified_developers) < len(developer_stats):
+                    response_lines.extend([
+                        "\n💪 未达标的小伙伴也请不要灰心，",
+                        "这只是开始，继续坚持，下期一定能达标！"
+                    ])
+                
+                # 更新结束语
+                response_lines.extend([
+                    "\n🌈 让我们继续努力，",
+                    "下期再战，更多惊喜奖励等你来挑战！ 🚀"
+                ])
                 
                 return "\n".join(response_lines)
 
@@ -458,8 +572,10 @@ class MessageHandler:
                 return error_msg
 
         except Exception as e:
-            error_msg = f"活动结束失败：处理命令时发生错误 - {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            if 'session' in dir(self.db):
+            if "EOF occurred in violation of protocol" in str(e):
+                # 如果是 SSL 错误，回滚事务并返回错误消息
                 self.db.rollback()
-            return error_msg
+                return "服务异常，请重试"
+            # 其他错误照常处理
+            logger.error(f"处理活动结束时出错: {str(e)}")
+            raise e
